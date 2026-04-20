@@ -18,6 +18,9 @@ TEMP_BASE = Path(r"C:\temp\esrgan_work")
 
 HOSTNAME = socket.gethostname()
 
+FFMPEG_BIN  = r"C:\tools\jav-pipeline\bin\ffmpeg.exe"
+FFPROBE_BIN = r"C:\tools\jav-pipeline\bin\ffprobe.exe"
+
 REALESRGAN_CANDIDATES = [
     Path(r"C:\tools\realesrgan\realesrgan-ncnn-vulkan.exe"),
     Path(r"C:\realesrgan\realesrgan-ncnn-vulkan.exe"),
@@ -49,7 +52,7 @@ def detect_bin():
 def get_framerate(video_path):
     try:
         result = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+            [FFPROBE_BIN, "-v", "error", "-select_streams", "v:0",
              "-show_entries", "stream=r_frame_rate",
              "-of", "csv=p=0", str(video_path)],
             capture_output=True, text=True
@@ -106,7 +109,7 @@ def process_file(input_path, binary):
         # Extract frames
         log(f"Extracting frames...")
         r = subprocess.run(
-            ["ffmpeg", "-y", "-i", str(input_path),
+            [FFMPEG_BIN, "-y", "-i", str(input_path),
              str(frames_dir / "frame_%04d.png")],
             capture_output=True, text=True
         )
@@ -131,7 +134,7 @@ def process_file(input_path, binary):
         fps = get_framerate(input_path)
         log(f"Reassembling at {fps}fps with audio")
         r = subprocess.run(
-            ["ffmpeg", "-y",
+            [FFMPEG_BIN, "-y",
              "-framerate", str(fps),
              "-i", str(upscaled_dir / "frame_%04d.png"),
              "-i", str(input_path),
