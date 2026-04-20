@@ -1,10 +1,12 @@
 #!/bin/bash
 # AV1 Transcode Script - B580 GPU (VAAPI)
 # Logic:
-#   < 1080p  → upscale to 1080p, AV1 QP28
-#   >= 1080p → keep original resolution, AV1 QP24
+#   < 1080p  → route to ESRGAN queue (Yuki/kurumi upscale) → AV1 QP24
+#   >= 1080p → AV1 QP24 directly
 
 SOURCE="/mnt/takao_data/JAV"
+ESRGAN_QUEUE="$SOURCE/esrgan_queue"
+ESRGAN_DONE="$SOURCE/esrgan_done"
 TEMP="/mnt/ai_beast/Transcoder"
 OUTPUT="$SOURCE/complete"
 LOG="$TEMP/transcode.log"
@@ -18,7 +20,7 @@ export LIBVA_DRIVER_NAME=iHD
 command -v ffmpeg  >/dev/null || { echo "ffmpeg not found"; exit 1; }
 command -v ffprobe >/dev/null || { echo "ffprobe not found"; exit 1; }
 
-mkdir -p "$TEMP" "$OUTPUT"
+mkdir -p "$TEMP" "$OUTPUT" "$ESRGAN_QUEUE" "$ESRGAN_DONE"
 
 log()  { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
 warn() { log "WARN  $*"; }
@@ -81,14 +83,17 @@ while IFS= read -r -d '' INPUT; do
     fi
 
     if [[ "$HEIGHT" -lt 1080 ]]; then
-        VF="scale_vaapi=w=-2:h=1080,format=vaapi"
-        QP=28
-        LABEL="upscale ${HEIGHT}p→1080p"
-    else
-        VF="format=vaapi"
-        QP=24
-        LABEL="keep ${HEIGHT}p"
+        # Route to ESRGAN queue for Yuki/kurumi to upscale first
+        mv "$INPUT" "$ESRGAN_QUEUE/"
+        log "→ESRGAN_QUEUE [${HEIGHT}p]: $BASENAME"
+        sed -i "s|^\[IN_PROGRESS\] ${BASENAME}$|[ESRGAN] ${BASENAME}|" "$QUEUE_LIST"
+        rmdir "$FILE_LOCK" 2>/dev/null
+        continue
     fi
+
+    VF="format=vaapi"
+    QP=24
+    LABEL="keep ${HEIGHT}p"
 
     log "START [$LABEL QP$QP]: $BASENAME"
     START_TIME=$(date +%s)
@@ -132,5 +137,64 @@ while IFS= read -r -d '' INPUT; do
     rmdir "$FILE_LOCK" 2>/dev/null
 
 done < <(find "$SOURCE" -maxdepth 1 \( -name "*.ts" -o -name "*.mp4" \) -type f -print0)
+
+# Phase 2: encode ESRGAN-upscaled files (already ≥1080p, AV1 QP24)
+log "--- Phase 2: ESRGAN Done Queue ---"
+while IFS= read -r -d '' INPUT; do
+    BASENAME=$(basename "$INPUT")
+    STEM="${BASENAME%.*}"
+    OUTFILE="$OUTPUT/${STEM}.mp4"
+    TMPFILE="$TEMP/${STEM}.mp4"
+    FILE_LOCK="$TEMP/${STEM}.lock"
+
+    if ! mkdir "$FILE_LOCK" 2>/dev/null; then
+        log "SKIP (processing): $BASENAME"
+        continue
+    fi
+
+    if [[ -f "$OUTFILE" ]]; then
+        log "SKIP (exists): $BASENAME"
+        rmdir "$FILE_LOCK" 2>/dev/null
+        continue
+    fi
+
+    log "START [esrgan→AV1 QP24]: $BASENAME"
+    START_TIME=$(date +%s)
+
+    ffmpeg -y -nostdin \
+        -hwaccel vaapi \
+        -hwaccel_device /dev/dri/renderD128 \
+        -hwaccel_output_format vaapi \
+        -i "$INPUT" \
+        -vf "format=vaapi" \
+        -c:v av1_vaapi \
+        -qp 24 \
+        -c:a aac \
+        -b:a 192k \
+        -movflags +faststart \
+        "$TMPFILE" 2>> "$LOG"
+
+    FFMPEG_RC=$?
+    ELAPSED=$(( $(date +%s) - START_TIME ))
+
+    if [[ $FFMPEG_RC -eq 0 ]]; then
+        OUT_SIZE=$(stat -c%s "$TMPFILE" 2>/dev/null || echo 0)
+        if [[ "$OUT_SIZE" -gt 0 ]]; then
+            mv "$TMPFILE" "$OUTFILE"
+            log "DONE [esrgan]: $BASENAME → complete/ (${ELAPSED}s)"
+            rm -f "$INPUT"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [esrgan] ${BASENAME} (${ELAPSED}s)" >> "$DONE_LIST"
+        else
+            err "Output empty, keeping: $BASENAME"
+            rm -f "$TMPFILE"
+        fi
+    else
+        err "FAILED esrgan encode (rc=$FFMPEG_RC): $BASENAME"
+        rm -f "$TMPFILE"
+    fi
+
+    rmdir "$FILE_LOCK" 2>/dev/null
+
+done < <(find "$ESRGAN_DONE" -maxdepth 1 -name "*.mp4" -type f -print0)
 
 log "=== Transcode Complete ==="
