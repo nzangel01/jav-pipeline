@@ -59,7 +59,7 @@ while IFS= read -r -d '' INPUT; do
     fi
 
     HEIGHT=$(ffprobe -v error -select_streams v:0 \
-        -show_entries stream=height -of csv=p=0 "$INPUT" 2>/dev/null)
+        -show_entries stream=height -of csv=p=0 "$INPUT" 2>/dev/null | head -1)
 
     if [[ -z "$HEIGHT" || ! "$HEIGHT" =~ ^[0-9]+$ ]]; then
         warn "Cannot read video stream: $BASENAME"
