@@ -136,7 +136,7 @@ while IFS= read -r -d '' INPUT; do
 
     rmdir "$FILE_LOCK" 2>/dev/null
 
-done < <(find "$SOURCE" -maxdepth 1 \( -name "*.ts" -o -name "*.mp4" \) -type f -print0)
+done < <({ find "$SOURCE" -maxdepth 1 -name "*.ts" -type f -print0; find "$SOURCE" -maxdepth 1 -name "*.mp4" -type f -print0; })
 
 # Phase 2: encode ESRGAN-upscaled files (already ≥1080p, AV1 QP24)
 log "--- Phase 2: ESRGAN Done Queue ---"
