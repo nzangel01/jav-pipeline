@@ -136,8 +136,8 @@ def process_file(input_path, binary):
              "-i", str(upscaled_dir / "frame_%04d.png"),
              "-i", str(input_path),
              "-map", "0:v", "-map", "1:a?",
-             "-c:v", "libx264", "-preset", "fast",
-             "-crf", "18", "-pix_fmt", "yuv420p",
+             "-c:v", "h264_nvenc", "-preset", "p4",
+             "-cq", "18", "-pix_fmt", "yuv420p",
              "-c:a", "copy",
              str(temp_out)],
             capture_output=True, text=True
