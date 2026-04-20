@@ -9,6 +9,8 @@ TEMP="/mnt/ai_beast/Transcoder"
 OUTPUT="$SOURCE/complete"
 LOG="$TEMP/transcode.log"
 LOCK_FILE="$TEMP/transcode.lock"
+QUEUE_LIST="$TEMP/queue.list"
+DONE_LIST="$TEMP/done.list"
 MIN_FREE_KB=10485760  # 10GB
 
 export LIBVA_DRIVER_NAME=iHD
@@ -30,6 +32,14 @@ fi
 
 log "=== AV1 Transcode Start ==="
 
+# Build queue list for this run
+> "$QUEUE_LIST"
+while IFS= read -r -d '' f; do
+    basename "$f" >> "$QUEUE_LIST"
+done < <(find "$SOURCE" -maxdepth 1 \( -name "*.ts" -o -name "*.mp4" \) -type f -print0)
+QUEUE_COUNT=$(wc -l < "$QUEUE_LIST")
+log "Queue: $QUEUE_COUNT file(s) found"
+
 while IFS= read -r -d '' INPUT; do
     BASENAME=$(basename "$INPUT")
     STEM="${BASENAME%.*}"
@@ -49,6 +59,9 @@ while IFS= read -r -d '' INPUT; do
         rmdir "$FILE_LOCK" 2>/dev/null
         continue
     fi
+
+    # Mark as in-progress in queue list
+    sed -i "s|^${BASENAME}$|[IN_PROGRESS] ${BASENAME}|" "$QUEUE_LIST"
 
     # Disk space check
     AVAIL=$(df "$TEMP" | awk 'NR==2 {print $4}')
@@ -103,13 +116,17 @@ while IFS= read -r -d '' INPUT; do
             log "DONE: $BASENAME → complete/ (${ELAPSED}s)"
             rm -f "$INPUT"
             log "DELETED source: $BASENAME"
+            sed -i "s|^\[IN_PROGRESS\] ${BASENAME}$|[DONE] ${BASENAME}|" "$QUEUE_LIST"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ${BASENAME} (${ELAPSED}s)" >> "$DONE_LIST"
         else
             err "Output file empty after encode, keeping source: $BASENAME"
             rm -f "$TMPFILE"
+            sed -i "s|^\[IN_PROGRESS\] ${BASENAME}$|[FAILED] ${BASENAME}|" "$QUEUE_LIST"
         fi
     else
         err "FAILED (rc=$FFMPEG_RC, ${ELAPSED}s): $BASENAME"
         rm -f "$TMPFILE"
+        sed -i "s|^\[IN_PROGRESS\] ${BASENAME}$|[FAILED] ${BASENAME}|" "$QUEUE_LIST"
     fi
 
     rmdir "$FILE_LOCK" 2>/dev/null
