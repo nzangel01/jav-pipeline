@@ -1,4 +1,6 @@
 #!/bin/bash
+set -o pipefail
+shopt -s nocasematch
 # JAV Auto-Categorizer
 # - ตรวจชื่อไฟล์ → แยก folder ตามค่าย
 # - ชื่อ hash / unknown → Unsorted/ + บันทึกใน unknown_files.txt
@@ -27,6 +29,11 @@ declare -A STUDIOS=(
     ["yuuhui"]="yuuhui"
     ["Ladies.Collection"]="Ladies-Collection"
     ["Ladies_Collection"]="Ladies-Collection"
+    ["229SCUTE"]="S-CUTE"
+    ["SCUTE"]="S-CUTE"
+    ["S-CUTE"]="S-CUTE"
+    ["SKMJ"]="SKMJ"
+    ["SQTE"]="S-CUTE"
 )
 
 moved=0

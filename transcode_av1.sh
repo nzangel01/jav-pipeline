@@ -1,4 +1,5 @@
 #!/bin/bash
+set -o pipefail
 # AV1 Transcode Script - B580 GPU (VAAPI)
 # Logic:
 #   < 1080p  → route to ESRGAN queue (Yuki/kurumi upscale) → AV1 QP24
@@ -42,123 +43,53 @@ done < <(find "$SOURCE" -maxdepth 1 \( -name "*.ts" -o -name "*.mp4" \) -type f 
 QUEUE_COUNT=$(wc -l < "$QUEUE_LIST")
 log "Queue: $QUEUE_COUNT file(s) found"
 
-while IFS= read -r -d '' INPUT; do
-    BASENAME=$(basename "$INPUT")
-    STEM="${BASENAME%.*}"
-    OUTFILE="$OUTPUT/${STEM}.mp4"
-    TMPFILE="$TEMP/${STEM}.mp4"
-    FILE_LOCK="$TEMP/${STEM}.lock"
+process_phase1() {
+    local INPUT="$1"
+    local BASENAME=$(basename "$INPUT")
+    local STEM="${BASENAME%.*}"
+    local OUTFILE="$OUTPUT/${STEM}.mp4"
+    local TMPFILE="$TEMP/${STEM}.mp4"
+    local FILE_LOCK="$TEMP/${STEM}.lock"
 
-    # Per-file lock to prevent race conditions between instances
     if ! mkdir "$FILE_LOCK" 2>/dev/null; then
         log "SKIP (processing): $BASENAME"
-        continue
+        return 0
     fi
     trap "rmdir '$FILE_LOCK' 2>/dev/null" RETURN
 
     if [[ -f "$OUTFILE" ]]; then
         log "SKIP (exists): $BASENAME"
-        rmdir "$FILE_LOCK" 2>/dev/null
-        continue
+        return 0
     fi
 
-    # Mark as in-progress in queue list
     sed -i "s|^${BASENAME}$|[IN_PROGRESS] ${BASENAME}|" "$QUEUE_LIST"
 
-    # Disk space check
+    local AVAIL
     AVAIL=$(df "$TEMP" | awk 'NR==2 {print $4}')
     if [[ "$AVAIL" -lt $MIN_FREE_KB ]]; then
         err "Insufficient disk space (${AVAIL}KB free), stopping."
-        rmdir "$FILE_LOCK" 2>/dev/null
-        break
+        return 2
     fi
 
+    local HEIGHT
     HEIGHT=$(ffprobe -v error -select_streams v:0 \
         -show_entries stream=height -of csv=p=0 "$INPUT" 2>/dev/null | head -1)
 
     if [[ -z "$HEIGHT" || ! "$HEIGHT" =~ ^[0-9]+$ ]]; then
         warn "Cannot read video stream: $BASENAME"
-        rmdir "$FILE_LOCK" 2>/dev/null
-        continue
+        sed -i "s|^\[IN_PROGRESS\] ${BASENAME}$|[FAILED] ${BASENAME}|" "$QUEUE_LIST"
+        return 1
     fi
 
     if [[ "$HEIGHT" -lt 1080 ]]; then
-        # Route to ESRGAN queue for Yuki/kurumi to upscale first
         mv "$INPUT" "$ESRGAN_QUEUE/"
         log "→ESRGAN_QUEUE [${HEIGHT}p]: $BASENAME"
         sed -i "s|^\[IN_PROGRESS\] ${BASENAME}$|[ESRGAN] ${BASENAME}|" "$QUEUE_LIST"
-        rmdir "$FILE_LOCK" 2>/dev/null
-        continue
+        return 0
     fi
 
-    VF="format=vaapi"
-    QP=24
-    LABEL="keep ${HEIGHT}p"
-
-    log "START [$LABEL QP$QP]: $BASENAME"
-    START_TIME=$(date +%s)
-
-    ffmpeg -y -nostdin \
-        -hwaccel vaapi \
-        -hwaccel_device /dev/dri/renderD128 \
-        -hwaccel_output_format vaapi \
-        -i "$INPUT" \
-        -vf "$VF" \
-        -c:v av1_vaapi \
-        -qp $QP \
-        -c:a aac \
-        -b:a 192k \
-        -movflags +faststart \
-        "$TMPFILE" 2>> "$LOG"
-
-    FFMPEG_RC=$?
-    ELAPSED=$(( $(date +%s) - START_TIME ))
-
-    if [[ $FFMPEG_RC -eq 0 ]]; then
-        OUT_SIZE=$(stat -c%s "$TMPFILE" 2>/dev/null || echo 0)
-        if [[ "$OUT_SIZE" -gt 0 ]]; then
-            mv "$TMPFILE" "$OUTFILE"
-            log "DONE: $BASENAME → complete/ (${ELAPSED}s)"
-            rm -f "$INPUT"
-            log "DELETED source: $BASENAME"
-            sed -i "s|^\[IN_PROGRESS\] ${BASENAME}$|[DONE] ${BASENAME}|" "$QUEUE_LIST"
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ${BASENAME} (${ELAPSED}s)" >> "$DONE_LIST"
-        else
-            err "Output file empty after encode, keeping source: $BASENAME"
-            rm -f "$TMPFILE"
-            sed -i "s|^\[IN_PROGRESS\] ${BASENAME}$|[FAILED] ${BASENAME}|" "$QUEUE_LIST"
-        fi
-    else
-        err "FAILED (rc=$FFMPEG_RC, ${ELAPSED}s): $BASENAME"
-        rm -f "$TMPFILE"
-        sed -i "s|^\[IN_PROGRESS\] ${BASENAME}$|[FAILED] ${BASENAME}|" "$QUEUE_LIST"
-    fi
-
-    rmdir "$FILE_LOCK" 2>/dev/null
-
-done < <({ find "$SOURCE" -maxdepth 1 -name "*.ts" -type f -print0; find "$SOURCE" -maxdepth 1 -name "*.mp4" -type f -print0; })
-
-# Phase 2: encode ESRGAN-upscaled files (already ≥1080p, AV1 QP24)
-log "--- Phase 2: ESRGAN Done Queue ---"
-while IFS= read -r -d '' INPUT; do
-    BASENAME=$(basename "$INPUT")
-    STEM="${BASENAME%.*}"
-    OUTFILE="$OUTPUT/${STEM}.mp4"
-    TMPFILE="$TEMP/${STEM}.mp4"
-    FILE_LOCK="$TEMP/${STEM}.lock"
-
-    if ! mkdir "$FILE_LOCK" 2>/dev/null; then
-        log "SKIP (processing): $BASENAME"
-        continue
-    fi
-
-    if [[ -f "$OUTFILE" ]]; then
-        log "SKIP (exists): $BASENAME"
-        rmdir "$FILE_LOCK" 2>/dev/null
-        continue
-    fi
-
-    log "START [esrgan→AV1 QP24]: $BASENAME"
+    log "START [keep ${HEIGHT}p QP24]: $BASENAME"
+    local START_TIME
     START_TIME=$(date +%s)
 
     ffmpeg -y -nostdin \
@@ -174,27 +105,81 @@ while IFS= read -r -d '' INPUT; do
         -movflags +faststart \
         "$TMPFILE" 2>> "$LOG"
 
-    FFMPEG_RC=$?
-    ELAPSED=$(( $(date +%s) - START_TIME ))
+    local FFMPEG_RC=$?
+    local ELAPSED=$(( $(date +%s) - START_TIME ))
 
-    if [[ $FFMPEG_RC -eq 0 ]]; then
-        OUT_SIZE=$(stat -c%s "$TMPFILE" 2>/dev/null || echo 0)
-        if [[ "$OUT_SIZE" -gt 0 ]]; then
-            mv "$TMPFILE" "$OUTFILE"
-            log "DONE [esrgan]: $BASENAME → complete/ (${ELAPSED}s)"
-            rm -f "$INPUT"
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [esrgan] ${BASENAME} (${ELAPSED}s)" >> "$DONE_LIST"
-        else
-            err "Output empty, keeping: $BASENAME"
-            rm -f "$TMPFILE"
-        fi
+    if [[ $FFMPEG_RC -eq 0 && $(stat -c%s "$TMPFILE" 2>/dev/null || echo 0) -gt 0 ]]; then
+        mv "$TMPFILE" "$OUTFILE"
+        log "DONE: $BASENAME → complete/ (${ELAPSED}s)"
+        rm -f "$INPUT"
+        sed -i "s|^\[IN_PROGRESS\] ${BASENAME}$|[DONE] ${BASENAME}|" "$QUEUE_LIST"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ${BASENAME} (${ELAPSED}s)" >> "$DONE_LIST"
     else
-        err "FAILED esrgan encode (rc=$FFMPEG_RC): $BASENAME"
+        err "FAILED (rc=$FFMPEG_RC, ${ELAPSED}s): $BASENAME"
         rm -f "$TMPFILE"
+        sed -i "s|^\[IN_PROGRESS\] ${BASENAME}$|[FAILED] ${BASENAME}|" "$QUEUE_LIST"
+    fi
+}
+
+while IFS= read -r -d '' INPUT; do
+    process_phase1 "$INPUT"
+    [[ $? -eq 2 ]] && break
+done < <({ find "$SOURCE" -maxdepth 1 -name "*.ts" -type f -print0; find "$SOURCE" -maxdepth 1 -name "*.mp4" -type f -print0; })
+
+# Phase 2: encode ESRGAN-upscaled files (already ≥1080p, AV1 QP24)
+process_phase2() {
+    local INPUT="$1"
+    local BASENAME=$(basename "$INPUT")
+    local STEM="${BASENAME%.*}"
+    local OUTFILE="$OUTPUT/${STEM}.mp4"
+    local TMPFILE="$TEMP/${STEM}.mp4"
+    local FILE_LOCK="$TEMP/${STEM}.lock"
+
+    if ! mkdir "$FILE_LOCK" 2>/dev/null; then
+        log "SKIP (processing): $BASENAME"
+        return 0
+    fi
+    trap "rmdir '$FILE_LOCK' 2>/dev/null" RETURN
+
+    if [[ -f "$OUTFILE" ]]; then
+        log "SKIP (exists): $BASENAME"
+        return 0
     fi
 
-    rmdir "$FILE_LOCK" 2>/dev/null
+    log "START [esrgan→AV1 QP24]: $BASENAME"
+    local START_TIME
+    START_TIME=$(date +%s)
 
+    ffmpeg -y -nostdin \
+        -hwaccel vaapi \
+        -hwaccel_device /dev/dri/renderD128 \
+        -hwaccel_output_format vaapi \
+        -i "$INPUT" \
+        -vf "format=vaapi" \
+        -c:v av1_vaapi \
+        -qp 24 \
+        -c:a aac \
+        -b:a 192k \
+        -movflags +faststart \
+        "$TMPFILE" 2>> "$LOG"
+
+    local FFMPEG_RC=$?
+    local ELAPSED=$(( $(date +%s) - START_TIME ))
+
+    if [[ $FFMPEG_RC -eq 0 && $(stat -c%s "$TMPFILE" 2>/dev/null || echo 0) -gt 0 ]]; then
+        mv "$TMPFILE" "$OUTFILE"
+        log "DONE [esrgan]: $BASENAME → complete/ (${ELAPSED}s)"
+        rm -f "$INPUT"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [esrgan] ${BASENAME} (${ELAPSED}s)" >> "$DONE_LIST"
+    else
+        err "FAILED esrgan encode (rc=$FFMPEG_RC, ${ELAPSED}s): $BASENAME"
+        rm -f "$TMPFILE"
+    fi
+}
+
+log "--- Phase 2: ESRGAN Done Queue ---"
+while IFS= read -r -d '' INPUT; do
+    process_phase2 "$INPUT"
 done < <(find "$ESRGAN_DONE" -maxdepth 1 -name "*.mp4" -type f -print0)
 
 log "=== Transcode Complete ==="
