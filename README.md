@@ -44,9 +44,9 @@ Input (TS/MP4)
 
 | Machine | IP | GPU | Role |
 |---|---|---|---|
-| silvia | 192.168.1.24 | Intel Arc B580 | VAAPI AV1 transcode, ESRGAN (Linux) |
-| Yuki | 192.168.1.6 | RTX 3060 x2 | ESRGAN worker, CPU AV1 fallback |
-| kurumi | 192.168.1.80 | RTX 3080 | ESRGAN worker (Windows) |
+| silvia | 192.168.1.X | Intel Arc B580 | VAAPI AV1 transcode, ESRGAN (Linux) |
+| Yuki | 192.168.1.Y | RTX 3060 x2 | ESRGAN worker, CPU AV1 fallback |
+| kurumi | 192.168.1.Z | RTX 3080 | ESRGAN worker (Windows) |
 
 NFS storage: TAKAO NAS at `10.10.10.240:/mnt/user/DATA` mounted at `/mnt/takao_data/`
 

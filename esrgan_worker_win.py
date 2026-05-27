@@ -161,6 +161,32 @@ def process_file(input_path, binary):
         release_lock(file_lock)
 
 
+MIN_FREE_GB = 20  # หยุดรับงานถ้า disk เหลือน้อยกว่านี้
+
+
+def get_free_gb(path):
+    import ctypes
+    free_bytes = ctypes.c_ulonglong(0)
+    ctypes.windll.kernel32.GetDiskFreeSpaceExW(str(path), None, None, ctypes.pointer(free_bytes))
+    return free_bytes.value / (1024 ** 3)
+
+
+def cleanup_stale_temp():
+    """ลบ temp dirs ที่ค้างจาก crash ครั้งก่อน"""
+    if not TEMP_BASE.exists():
+        return
+    count = 0
+    for d in TEMP_BASE.iterdir():
+        if d.is_dir():
+            # ถ้าไม่มี lock อยู่ (ไม่ได้ process) → stale
+            lock = LOCK_DIR / f"{d.name}.lock"
+            if not lock.exists():
+                shutil.rmtree(d, ignore_errors=True)
+                count += 1
+    if count:
+        log(f"Cleaned {count} stale temp dirs")
+
+
 def main():
     for d in [QUEUE_DIR, DONE_DIR, LOCK_DIR, TEMP_BASE]:
         d.mkdir(parents=True, exist_ok=True)
@@ -173,17 +199,23 @@ def main():
     log(f"=== ESRGAN Worker Started ===")
     log(f"Binary: {binary}")
     log(f"Queue: {QUEUE_DIR}")
+    cleanup_stale_temp()
 
     while True:
         try:
-            for ext in ["*.mp4", "*.ts", "*.mkv"]:
-                for input_path in sorted(QUEUE_DIR.glob(ext)):
-                    stem = input_path.stem
-                    file_lock = LOCK_DIR / f"{stem}.lock"
-                    if acquire_lock(file_lock):
-                        process_file(input_path, binary)
-                    else:
-                        log(f"SKIP (locked): {input_path.name}")
+            cleanup_stale_temp()
+            free_gb = get_free_gb(TEMP_BASE)
+            if free_gb < MIN_FREE_GB:
+                log(f"WARN: disk low ({free_gb:.1f}GB free < {MIN_FREE_GB}GB) — skipping this round")
+            else:
+                for ext in ["*.mp4", "*.ts", "*.mkv"]:
+                    for input_path in sorted(QUEUE_DIR.glob(ext)):
+                        stem = input_path.stem
+                        file_lock = LOCK_DIR / f"{stem}.lock"
+                        if acquire_lock(file_lock):
+                            process_file(input_path, binary)
+                        else:
+                            log(f"SKIP (locked): {input_path.name}")
         except Exception as e:
             log(f"Loop error: {e}")
 
