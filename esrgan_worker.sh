@@ -1,4 +1,5 @@
 #!/bin/bash
+set -o pipefail
 # ESRGAN Worker for JAV Pipeline
 # Runs on Yuki (.6) and Kurumi (.80) via NFS shared storage
 
@@ -6,10 +7,9 @@ QUEUE_DIR="/mnt/takao_data/JAV/esrgan_queue"
 DONE_DIR="/mnt/takao_data/JAV/esrgan_done"
 LOG_FILE="$DONE_DIR/esrgan_worker.log"
 LOCK_DIR="$DONE_DIR/.locks"
-WORK_DIR="/tmp/esrgan_work"
+WORK_DIR="/var/lib/docker/esrgan_work"
 
 BIN_YUKI="$HOME/bin/realesrgan/realesrgan-ncnn-vulkan"
-BIN_KURUMI="C:\\tools\\realesrgan\\realesrgan-ncnn-vulkan"
 BIN=""
 
 FS_LOCK="$DONE_DIR/esrgan_worker.lock"
@@ -77,7 +77,7 @@ process_file() {
     local FPS
     FPS=$(ffprobe -v error -select_streams v:0 \
         -show_entries stream=r_frame_rate -of csv=p=0 "$INPUT" 2>/dev/null | head -1)
-    FPS=$(echo "scale=3; $FPS" | bc 2>/dev/null || echo "30")
+    FPS=$(awk -F/ 'NR==1 && $2>0 {printf "%.3f", $1/$2; exit} END {if (!found) print "30"}' <<< "$FPS")
 
     log "Extracting frames from $BASENAME (fps=$FPS)"
     ffmpeg -y -i "$INPUT" "$TEMP_FRAMES/frame_%04d.png" 2>> "$LOG_FILE"
@@ -101,7 +101,7 @@ process_file() {
     ffmpeg -y -framerate "$FPS" -i "$TEMP_UPSCALED/frame_%04d.png" \
         -i "$INPUT" \
         -map 0:v -map 1:a? \
-        -c:v libx264 -preset fast -crf 18 -pix_fmt yuv420p \
+        -c:v libx264 -preset ultrafast -crf 0 -pix_fmt yuv420p \
         -c:a copy \
         "$TEMP_OUTPUT" 2>> "$LOG_FILE"
     
